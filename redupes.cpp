@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -5,13 +7,16 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <filesystem>
+#include "progressbar.hpp"
 
-int find_symlink_files(const std::string &search_path, int max_file_size = 1500, int threads = 1, std::string temp_directory = "/tmp/")
+int find_symlink_files(const std::string &search_path, int max_file_size = 1000, int threads = 1)
 {
+    std::cout << "Searching for symlink files..." << std::endl;
+
     std::string command = 
         "find " + search_path + " -type f -size -" + std::to_string(max_file_size) + "c -print0 | " +
         "xargs -0 -P " + std::to_string(threads) + " grep -aE '^IntxLNK' | " +
-        "tr -d '\\000' | tr -d '\\001' > " + temp_directory + "redupes.txt";
+        "tr -d '\\000' | tr -d '\\001' > " + "/tmp/redupes.txt";
 
     return system(command.c_str());
 }
@@ -50,23 +55,21 @@ bool path_exists(const std::string path)
 void copy_file(const std::string &source_file, const std::string &destination_file)
 {
     std::ifstream source(source_file, std::ios::binary);
+    std::ofstream destination(destination_file, std::ios::binary);
 
-    if (path_exists(source_file))
-    {
-        std::ofstream destination(destination_file, std::ios::binary);
-        destination << source.rdbuf();
-    }
+    destination << source.rdbuf();
 }
 
-void safe_copy(const std::string &source, const std::string &destination, std::string temp_directory = "/tmp/")
+void safe_copy(const std::string &source, const std::string &destination)
 {
-    copy_file(source, destination + "_copy");
+    if (path_exists(source))
+    {
+        copy_file(source, destination + "_copy");
 
-    std::string base_filename = destination.substr(destination.find_last_of("/\\") + 1);
-    copy_file(destination, temp_directory + base_filename);
+        std::remove(destination.c_str());
 
-    // std::remove(destination.c_str());
-    std::rename((destination + "_copy").c_str(), destination.c_str());
+        std::rename((destination + "_copy").c_str(), destination.c_str());
+    }
 }
 
 void print_help_message()
@@ -98,11 +101,7 @@ void print_help_message()
             Search for files with size under MAX_FILE_SIZE.
             The smaller the value you specify here the faster the search speed, 
             but setting it too low might miss some symlinks that link to a long path. 
-            Defaults to 1500 bytes.
-
-        -d <TEMP_DIRECTORY>
-            Specifies which directory to use for storing temporary files.
-            Defaults to /tmp.
+            Defaults to 1000 bytes.
 
         -o <ORIGINAL_PATH> 
             This option is used in combination with the -r flag and is used to 
@@ -157,7 +156,6 @@ std::map<std::string, std::string> parse_arguments(int argc, char *argv[])
         {"-m", "max_file_size"},
         {"-o", "original_path"},
         {"-r", "replace_path"},
-        {"-d", "temp_directory"},
     };
 
     std::map<std::string, std::string> arguments;
@@ -177,9 +175,6 @@ std::map<std::string, std::string> parse_arguments(int argc, char *argv[])
     if (arguments.count("replace_path") && !path_exists(arguments.at("replace_path")))
         exit_with_status(2, "Specified REPLACE_PATH does not exist or is not accessible.");
 
-    if (arguments.count("temp_directory") && !path_exists(arguments.at("temp_directory")))
-        exit_with_status(2, "Specified TEMP_DIRECTORY does not exist or is not accessible.");
-
     if (arguments.count("max_file_size") && !is_number(arguments.at("max_file_size")))
         exit_with_status(2, "Invalid size specified for MAX_FILE_SIZE.");
 
@@ -187,6 +182,25 @@ std::map<std::string, std::string> parse_arguments(int argc, char *argv[])
         exit_with_status(2, "Invalid amount specified for THREADS.");
 
     return arguments;
+}
+
+int get_file_line_count()
+{
+    std::string command = "wc -l /tmp/redupes.txt > /tmp/redupes_count.txt";
+
+    system(command.c_str());
+
+    std::fstream count_file("/tmp/redupes_count.txt");
+
+    std::string line;
+    std::getline(count_file, line);
+
+    int count = std::stoi(line);
+
+    count_file.close();
+    std::remove("/tmp/redupes_count.txt");
+
+    return count;
 }
 
 int main(int argc, char *argv[])
@@ -199,28 +213,32 @@ int main(int argc, char *argv[])
 
     if (find_symlink_status == 0)
     {
-        if (arguments.count("temp_directory"))
-            redupes.open(arguments.at("temp_directory") + "/redupes.txt");
-    
-        else redupes.open("/tmp/redupes.txt");
-    
+        redupes.open("/tmp/redupes.txt");
+
         if (!redupes.is_open())
             exit_with_status(2, "Could not generate temporary redupes file. Exiting...");
-    
+
         std::string line;
-    
+
+        float current_line_count = 0;
+        size_t total_line_count = get_file_line_count();
+        ProgressBar progress{std::clog, 70u, "Reduplicating"};
+
         if (arguments.count("replace_path"))
         {
             while(std::getline(redupes, line))
             {
                 std::pair<std::string, std::string> paths = split_paths(line);
-    
+
                 paths.second = replace_path(paths.second, arguments.at("original_path"), arguments.at("replace_path"));
-    
+
                 safe_copy(paths.second, paths.first);
+
+                current_line_count++;
+                progress.write(current_line_count / total_line_count);
             }
         }
-    
+
         else
         {
             while(std::getline(redupes, line))
@@ -228,9 +246,12 @@ int main(int argc, char *argv[])
                 std::pair<std::string, std::string> paths = split_paths(line);
 
                 safe_copy(paths.second, paths.first);
+
+                current_line_count++;
+                progress.write(current_line_count / total_line_count);
             }
         }
-    
+
         redupes.close();
     }
 
